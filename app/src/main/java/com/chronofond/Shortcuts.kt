@@ -351,6 +351,7 @@ private fun Editor(src: Source, onBack: () -> Unit) {
     var label by remember(src) { mutableStateOf(src.label) }
     var hideName by remember(src) { mutableStateOf(false) }
     var round by remember(src) { mutableStateOf(true) }
+    var asWidget by remember(src) { mutableStateOf(true) }
     var callDirect by remember(src) { mutableStateOf(src.numbers.isNotEmpty()) }
     var numberIdx by remember(src) { mutableStateOf(0) }
     var msg by remember { mutableStateOf("") }
@@ -375,13 +376,15 @@ private fun Editor(src: Source, onBack: () -> Unit) {
             callDirect -> Intent(Intent.ACTION_CALL, Uri.fromParts("tel", src.numbers[numberIdx], null))
             else -> Intent(Intent.ACTION_VIEW, src.lookupUri)
         }
-        msg = createShortcut(
-            ctx, src.key, intent, composeIcon(shaped, scale, ox, oy, 432),
-            if (hideName) "" else label,
-            note = if (isContact && callDirect)
-                " Si l'appel ne part pas au toucher, autorisez aussi « Passer des appels » dans les autorisations de Chronofond."
-            else ""
-        )
+        val icon = composeIcon(shaped, scale, ox, oy, 432)
+        val note = if (isContact && callDirect)
+            " Si l'appel ne part pas au toucher, autorisez aussi « Passer des appels » dans les autorisations de Chronofond."
+        else ""
+        if (asWidget) {
+            msg = createWidget(ctx, intent, icon, note)
+            return
+        }
+        msg = createShortcut(ctx, src.key, intent, icon, if (hideName) "" else label, note)
     }
 
     val callPerm = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -464,12 +467,24 @@ private fun Editor(src: Source, onBack: () -> Unit) {
             }
         }
 
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Switch(checked = asWidget, onCheckedChange = { asWidget = it })
+            Text("Fond transparent (widget)")
+        }
+        Text(
+            if (asWidget)
+                "Méthode widget : l'icône est ajoutée comme un petit widget 1x1, sans fond ajouté par le lanceur. " +
+                    "Le nom n'est pas affiché."
+            else
+                "Méthode raccourci : le lanceur peut ajouter un fond (blanc sur certains téléphones).",
+            style = MaterialTheme.typography.bodySmall
+        )
         OutlinedTextField(
             value = label,
             onValueChange = { label = it },
             label = { Text("Nom du raccourci") },
             singleLine = true,
-            enabled = !hideName,
+            enabled = !hideName && !asWidget,
             modifier = Modifier.fillMaxWidth()
         )
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -493,6 +508,18 @@ private fun Editor(src: Source, onBack: () -> Unit) {
             Text("Autorisation « Créer des raccourcis »")
         }
         OutlinedButton(onClick = onBack, modifier = Modifier.fillMaxWidth()) { Text("Retour à la liste") }
+    }
+}
+
+private fun createWidget(ctx: Context, launch: Intent?, icon: Bitmap, note: String): String {
+    if (launch == null) return "Impossible de créer ce widget."
+    IconWidgetProvider.savePending(ctx, icon, launch)
+    return if (IconWidgetProvider.requestPin(ctx)) {
+        "Demande envoyée. Validez l'ajout du widget s'il est demandé, puis placez-le où vous voulez. " +
+            "Vous pouvez ensuite retirer l'icône d'origine de l'écran d'accueil." + note
+    } else {
+        "Votre lanceur n'ajoute pas le widget automatiquement : appuyez longuement sur l'écran d'accueil, " +
+            "choisissez Widgets, puis « Icône Chronofond » (1x1) et placez-le." + note
     }
 }
 
