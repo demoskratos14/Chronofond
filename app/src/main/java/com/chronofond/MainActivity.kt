@@ -40,6 +40,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
@@ -73,6 +74,12 @@ import kotlin.math.max
 import kotlin.math.min
 
 class MainActivity : ComponentActivity() {
+    override fun onResume() {
+        super.onResume()
+        Scheduler.startGuards(this)
+        Scheduler.repairNow(this)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
@@ -98,12 +105,15 @@ fun App() {
     val flow = remember { ctx.configFlow }
     val cfg by flow.collectAsState(initial = AppConfig())
     var tab by remember { mutableIntStateOf(0) }
+    var showHelp by remember { mutableStateOf(false) }
+    if (showHelp) HelpDialog { showHelp = false }
 
     Scaffold(
         containerColor = Color.Transparent,
         topBar = {
             TopAppBar(
                 title = { Text("Chronofond") },
+                actions = { TextButton(onClick = { showHelp = true }) { Text("Aide") } },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent)
             )
         }
@@ -112,9 +122,13 @@ fun App() {
             TabRow(selectedTabIndex = tab, containerColor = Color.Transparent) {
                 Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text("Accueil") })
                 Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text("Verrouillage") })
+                Tab(selected = tab == 2, onClick = { tab = 2 }, text = { Text("Raccourcis") })
             }
-            if (tab == 0) ScreenPanel(Target.HOME, cfg.home, cfg)
-            else ScreenPanel(Target.LOCK, cfg.lock, cfg)
+            when (tab) {
+                0 -> ScreenPanel(Target.HOME, cfg.home, cfg)
+                1 -> ScreenPanel(Target.LOCK, cfg.lock, cfg)
+                else -> ShortcutsTab()
+            }
         }
     }
 }

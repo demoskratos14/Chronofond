@@ -111,6 +111,13 @@ object Status {
         prefs(ctx).getString(t.name, "Aucun changement tenté pour l'instant") ?: ""
 }
 
+/** Mémorise l'identifiant du fond posé par l'appli, pour détecter qu'un autre programme l'a remplacé. */
+object Guard {
+    private fun prefs(ctx: Context) = ctx.getSharedPreferences("wpid", Context.MODE_PRIVATE)
+    fun saved(ctx: Context, t: Target): Int = prefs(ctx).getInt(t.name, 0)
+    fun save(ctx: Context, t: Target, id: Int) = prefs(ctx).edit().putInt(t.name, id).apply()
+}
+
 private fun canRead(ctx: Context, s: String): Boolean = try {
     ctx.contentResolver.openInputStream(Uri.parse(s))?.use { true } ?: false
 } catch (e: Exception) {
@@ -123,9 +130,21 @@ class WallpaperWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(
         val target = inputData.getString("target")?.let { Target.valueOf(it) }
             ?: return@withContext Result.failure()
         val force = inputData.getBoolean("force", false)
+        val repair = inputData.getBoolean("repair", false)
         val app = applicationContext
         val cfg = app.configFlow.first()
         val sc = if (target == Target.HOME) cfg.home else cfg.lock
+        val flag = if (target == Target.HOME) WallpaperManager.FLAG_SYSTEM
+        else WallpaperManager.FLAG_LOCK
+        val wm = WallpaperManager.getInstance(app)
+
+        // Mode "réparation" : ne fait rien si le fond posé par l'appli est toujours en place
+        if (repair) {
+            val saved = Guard.saved(app, target)
+            if (!sc.enabled || saved == 0 || sc.current.isEmpty() || wm.getWallpaperId(flag) == saved) {
+                return@withContext Result.success()
+            }
+        }
 
         // "Changer maintenant" (force) fonctionne même si la rotation automatique est désactivée
         if (!sc.enabled && !force) {
@@ -144,7 +163,9 @@ class WallpaperWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(
             val w = min(dm.widthPixels, dm.heightPixels)
             val h = max(dm.widthPixels, dm.heightPixels)
             val ratios = Mosaic.cellRects(sc, w, h).map { it.width() / it.height() }
-            val pick = Picker.next(sc, pool, ratios) { PhotoRatios.of(app, it) }
+            val pick = if (repair && sc.current.size == ratios.size)
+                Pick(sc.current, sc.cursor, sc.cellPtr)   // on remet le même fond, sans avancer
+            else Picker.next(sc, pool, ratios) { PhotoRatios.of(app, it) }
 
             if (pick.current.none { canRead(app, it) }) {
                 Status.set(app, target, "Photos illisibles (permission perdue ?) : retirez-les puis ajoutez-les de nouveau")
@@ -152,14 +173,17 @@ class WallpaperWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(
             }
 
             val bmp = Mosaic.render(app, pick.current, sc, w, h)
-            val flag = if (target == Target.HOME) WallpaperManager.FLAG_SYSTEM
-            else WallpaperManager.FLAG_LOCK
-            WallpaperManager.getInstance(app).setBitmap(bmp, null, true, flag)
+            wm.setBitmap(bmp, null, true, flag)
+            Guard.save(app, target, wm.getWallpaperId(flag))
             bmp.recycle()
             app.updateScreen(target) {
                 it.copy(cursor = pick.cursor, current = pick.current, cellPtr = pick.cellPtr)
             }
-            Status.set(app, target, "Fond d'écran changé (${pick.current.size} photo(s))")
+            Status.set(
+                app, target,
+                if (repair) "Fond remis en place : le système l'avait remplacé"
+                else "Fond d'écran changé (${pick.current.size} photo(s))"
+            )
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -172,11 +196,34 @@ class WallpaperWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(
 
 object Scheduler {
     private fun name(t: Target) = "wallpaper_${t.name}"
+    private fun guardName(t: Target) = "guard_${t.name}"
+
+    /** Surveillance toutes les 15 min : remet le fond si le système l'a remplacé. */
+    fun startGuards(ctx: Context) {
+        val wm = WorkManager.getInstance(ctx)
+        for (t in Target.values()) {
+            val req = PeriodicWorkRequestBuilder<WallpaperWorker>(15, TimeUnit.MINUTES)
+                .setInputData(workDataOf("target" to t.name, "repair" to true))
+                .build()
+            wm.enqueueUniquePeriodicWork(guardName(t), ExistingPeriodicWorkPolicy.KEEP, req)
+        }
+    }
+
+    /** Vérification immédiate (à l'ouverture de l'appli). */
+    fun repairNow(ctx: Context) {
+        for (t in Target.values()) {
+            val req = OneTimeWorkRequestBuilder<WallpaperWorker>()
+                .setInputData(workDataOf("target" to t.name, "repair" to true))
+                .build()
+            WorkManager.getInstance(ctx).enqueue(req)
+        }
+    }
 
     fun schedule(ctx: Context, t: Target, sc: ScreenConfig) {
         val wm = WorkManager.getInstance(ctx)
         if (!sc.enabled) {
             wm.cancelUniqueWork(name(t))
+            wm.cancelUniqueWork(guardName(t))
             return
         }
         val req = PeriodicWorkRequestBuilder<WallpaperWorker>(
